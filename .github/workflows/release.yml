@@ -1,5 +1,5 @@
 name: release
-# Every push to main: test, build Linux/Windows/macOS programs, publish them as release "build-N".
+# Every push to main: test, build Linux and Windows programs, publish them as release "build-N".
 # Installed copies (cpuforge update, the Update button, --auto-update) pick up the newest release.
 on:
   push:
@@ -18,11 +18,11 @@ jobs:
   build:
     needs: test
     strategy:
+      fail-fast: false
       matrix:
         include:
           - { os: ubuntu-22.04, asset: cpuforge-linux-x64, bin: cpuforge, flags: "-C target-cpu=x86-64" }
           - { os: windows-latest, asset: cpuforge-windows-x64.exe, bin: cpuforge.exe, flags: "-C target-cpu=x86-64" }
-          - { os: macos-latest, asset: cpuforge-macos-arm64, bin: cpuforge, flags: "-C target-cpu=generic" }
     runs-on: ${{ matrix.os }}
     env:
       CPUFORGE_BUILD: ${{ github.run_number }}   # becomes the version: 0.N
@@ -36,7 +36,7 @@ jobs:
           mkdir out
           cp target/release/${{ matrix.bin }} out/${{ matrix.asset }}
           cd out
-          if command -v sha256sum >/dev/null; then sha256sum ${{ matrix.asset }} > ${{ matrix.asset }}.sha256; else shasum -a 256 ${{ matrix.asset }} > ${{ matrix.asset }}.sha256; fi
+          if command -v sha256sum >/dev/null; then sha256sum ${{ matrix.asset }} > ${{ matrix.asset }}.sha256; fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
