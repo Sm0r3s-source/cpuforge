@@ -1,0 +1,11 @@
+[package]
+name = "cf-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Llama-style model definition (RMSNorm, RoPE, GQA, SwiGLU) with forward and backward"
+
+[dependencies]
+cf-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

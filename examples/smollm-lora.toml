@@ -1,0 +1,25 @@
+# LoRA finetune of SmolLM-135M. Download the model first (see README), run from the repo root.
+
+[model]
+path = "models/SmolLM-135M"        # tokenizer.json is picked up from this directory
+
+[data]
+path = "examples/sample.jsonl"     # .jsonl, or a plain text file
+seq_len = 512
+val_fraction = 0.1
+
+[lora]
+rank = 16
+alpha = 32
+targets = ["q", "k", "v", "o", "gate", "up", "down"]
+
+[train]
+mode = "lora"                      # "lora" or "full"
+steps = 200
+batch = 4                          # sequences per optimizer step
+lr = 2e-4
+warmup_steps = 10
+eval_every = 25
+save_every = 25
+memory = "full"                    # "checkpoint" trades ~30% speed for much less RAM
+out_dir = "runs/smollm-demo"

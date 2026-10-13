@@ -1,0 +1,16 @@
+[package]
+name = "cf-train"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LoRA layers, AdamW, LR schedules, data loading and the training loop"
+
+[dependencies]
+cf-core = { path = "../core" }
+cf-model = { path = "../model" }
+cf-io = { path = "../io" }
+tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+tempfile = "3.27.0"

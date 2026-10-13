@@ -1,0 +1,4 @@
+{"prompt": "Q: What is the capital of Lithuania?\nA:", "completion": " Vilnius."}
+{"prompt": "Q: What does LoRA stand for?\nA:", "completion": " Low-Rank Adaptation, a way to finetune a model by training small added matrices."}
+{"prompt": "Q: Why finetune on a CPU?\nA:", "completion": " Small models and short runs are practical without a GPU, and it keeps everything local."}
+{"text": "Rust gives memory safety without a garbage collector, which makes it a good fit for numerical code."}

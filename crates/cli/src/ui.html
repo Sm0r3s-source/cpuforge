@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cpuforge</title>
+<style>
+:root{--bg:#f6f5f2;--card:#fff;--ink:#1d1d1b;--mute:#6b6a64;--line:#dedbd3;--acc:#c2410c;--acc2:#0f766e;--code:#f0eee8}
+@media (prefers-color-scheme:dark){:root{--bg:#171715;--card:#201f1d;--ink:#ecebe6;--mute:#9b9a92;--line:#34332f;--acc:#fb923c;--acc2:#2dd4bf;--code:#141412}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,sans-serif}
+header{display:flex;align-items:baseline;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line)}
+header b{font-size:20px}header span{color:var(--mute)}
+main{display:grid;grid-template-columns:minmax(300px,420px) 1fr;gap:16px;padding:16px 20px;max-width:1300px;margin:auto}
+@media(max-width:820px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+nav{display:flex;gap:4px;margin-bottom:12px;flex-wrap:wrap}
+nav button{border:1px solid var(--line);background:none;color:var(--ink);padding:6px 12px;border-radius:7px;cursor:pointer}
+nav button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+label{display:block;margin:9px 0 3px;color:var(--mute);font-size:13px}
+input,select,textarea{width:100%;padding:7px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit}
+textarea{min-height:90px;font-family:ui-monospace,monospace;font-size:13px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.go{margin-top:14px;padding:9px 16px;border:0;border-radius:7px;background:var(--acc);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+.go:disabled{opacity:.45;cursor:default}.ghost{background:none;border:1px solid var(--line);color:var(--ink);font-weight:400}
+.hint{color:var(--mute);font-size:12.5px;margin:4px 0 0}
+.pane{display:none}.pane.on{display:block}
+canvas{width:100%;height:230px;display:block}
+#bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin:10px 0}#bar i{display:block;height:100%;width:0;background:var(--acc2);transition:width .3s}
+#stat{display:flex;gap:14px;flex-wrap:wrap;color:var(--mute);font-size:13px}#stat b{color:var(--ink)}
+pre{background:var(--code);border-radius:8px;padding:10px;max-height:340px;overflow:auto;white-space:pre-wrap;word-break:break-word;font:12.5px/1.4 ui-monospace,monospace;margin:10px 0 0}
+#err{color:#dc2626;margin-top:8px;min-height:1em}
+</style></head><body>
+<header><b>cpuforge</b><span>train and finetune language models on your CPU &middot; runs only on this computer</span><span style="margin-left:auto"><span id="ver"></span> <button class="go ghost" id="b-upd" style="margin:0 0 0 8px;padding:4px 10px">Check for updates</button></span></header>
+<main>
+<section class="card">
+<nav id="tabs"></nav>
+
+<div class="pane" id="p-train">
+<label>Base model</label><select id="t-model"></select>
+<label>Training data</label><select id="t-data"></select>
+<p class="hint">Plain text, or JSONL with {"text"} or {"prompt","completion"} per line. Put files in this folder, or paste text under <i>Data</i>.</p>
+<div class="row"><div><label>Method</label><select id="t-mode"><option value="lora">LoRA (small adapter, fast)</option><option value="full">Full (all weights)</option></select></div>
+<div><label>Steps</label><input id="t-steps" value="100"></div></div>
+<div class="row"><div><label>Batch (sequences/step)</label><input id="t-batch" value="4"></div><div><label>Learning rate</label><input id="t-lr" value="2e-4"></div></div>
+<div class="row"><div><label>Sequence length</label><input id="t-seq" value="256"></div><div><label>LoRA rank</label><input id="t-rank" value="16"></div></div>
+<div class="row"><div><label>Memory</label><select id="t-mem"><option value="full">Fast (keep activations)</option><option value="checkpoint">Low RAM (recompute)</option></select></div>
+<div><label>Output folder</label><input id="t-out" value="runs/ui"></div></div>
+<label><input type="checkbox" id="t-resume" style="width:auto"> Resume an interrupted run in that folder</label>
+<button class="go" id="b-train">Start training</button>
+</div>
+
+<div class="pane" id="p-gen">
+<label>Model</label><select id="g-model"></select>
+<label>Adapter (optional)</label><select id="g-adapter"></select>
+<label>Prompt</label><textarea id="g-prompt">Once upon a time</textarea>
+<div class="row"><div><label>New tokens</label><input id="g-tokens" value="80"></div><div><label>Temperature (0 = greedy)</label><input id="g-temp" value="0.8"></div></div>
+<button class="go" id="b-gen">Generate</button>
+<p class="hint">No KV cache yet, so long outputs get slow.</p>
+</div>
+
+<div class="pane" id="p-merge">
+<label>Base model</label><select id="m-model"></select>
+<label>Adapter</label><select id="m-adapter"></select>
+<label>Write merged model to</label><input id="m-out" value="models/merged">
+<button class="go" id="b-merge">Merge</button>
+<p class="hint">Produces a plain model folder that other tools can load.</p>
+</div>
+
+<div class="pane" id="p-new">
+<label>New random model (for training from scratch, byte-level tokenizer)</label>
+<div class="row"><div><label>Preset</label><select id="n-preset"><option value="tiny">tiny (0.8M)</option><option value="small">small (4M)</option></select></div>
+<div><label>Folder</label><input id="n-out" value="models/mine"></div></div>
+<button class="go" id="b-new">Create</button>
+</div>
+
+<div class="pane" id="p-data">
+<label>File name (.txt or .jsonl)</label><input id="d-name" value="notes.txt">
+<label>Text</label><textarea id="d-text" style="min-height:200px" placeholder="Paste training text here"></textarea>
+<button class="go" id="b-data">Save to data/</button>
+</div>
+<div id="err"></div>
+</section>
+
+<section class="card">
+<div id="stat"><span>job: <b id="s-kind">none</b></span><span>step <b id="s-step">-</b></span><span>loss <b id="s-loss">-</b></span><span>val <b id="s-val">-</b></span><span><b id="s-state">idle</b></span></div>
+<div id="bar"><i></i></div>
+<canvas id="chart" width="900" height="460"></canvas>
+<div style="display:flex;gap:8px;margin-top:8px"><button class="go ghost" id="b-cancel" disabled style="margin:0">Cancel</button><button class="go ghost" id="b-refresh" style="margin:0">Refresh files</button></div>
+<pre id="log">Nothing running.</pre>
+</section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const TABS=[["train","Train"],["gen","Generate"],["merge","Merge"],["new","New model"],["data","Data"]];
+let since=0,jobId=0,pts=[],vals=[],total=0,timer=null,fullLog="";
+TABS.forEach(([k,n],i)=>{const b=document.createElement("button");b.textContent=n;b.onclick=()=>show(k);b.dataset.k=k;$("tabs").append(b)});
+function show(k){document.querySelectorAll("#tabs button").forEach(b=>b.classList.toggle("on",b.dataset.k===k));document.querySelectorAll(".pane").forEach(p=>p.classList.toggle("on",p.id==="p-"+k))}
+show("train");
+async function api(path,body){
+  const r=await fetch(path,body===undefined?{}:{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const j=await r.json();if(!r.ok)throw new Error(j.error||r.statusText);return j}
+function fill(sel,items,blank){const s=$(sel),old=s.value;s.replaceChildren();
+  if(blank){const o=document.createElement("option");o.value="";o.textContent=blank;s.append(o)}
+  items.forEach(x=>{const o=document.createElement("option");o.value=o.textContent=x;s.append(o)});
+  if(items.includes(old))s.value=old}
+async function files(){try{const f=await api("/api/files");
+  ["t-model","g-model","m-model"].forEach(i=>fill(i,f.models));
+  fill("t-data",f.data);fill("g-adapter",f.adapters,"(none)");fill("m-adapter",f.adapters);
+  if(!f.models.length)$("err").textContent="No models found. Use New model, or put a Hugging Face model folder (config.json + safetensors) in "+f.cwd+"/models."}catch(e){$("err").textContent=e.message}}
+function num(id){return $(id).value}
+async function run(action,body){$("err").textContent="";
+  try{await api("/api/run/"+action,body);since=0;pts=[];vals=[];total=0;fullLog="";poll()}catch(e){$("err").textContent=e.message}}
+$("b-train").onclick=()=>run("train",{model:num("t-model"),data:num("t-data"),mode:num("t-mode"),steps:num("t-steps"),batch:num("t-batch"),lr:num("t-lr"),seq_len:num("t-seq"),rank:num("t-rank"),alpha:2*Number(num("t-rank")),memory:num("t-mem"),out_dir:num("t-out"),eval_every:Math.max(1,Math.floor(Number(num("t-steps"))/5)),resume:$("t-resume").checked});
+$("b-gen").onclick=()=>run("generate",{model:num("g-model"),adapter:num("g-adapter"),prompt:num("g-prompt"),tokens:num("g-tokens"),temp:num("g-temp")});
+$("b-merge").onclick=()=>run("merge",{model:num("m-model"),adapter:num("m-adapter"),out:num("m-out")});
+$("b-new").onclick=()=>run("init",{out:num("n-out"),preset:num("n-preset")});
+$("b-data").onclick=async()=>{$("err").textContent="";try{const r=await api("/api/data",{name:num("d-name"),text:num("d-text")});$("err").textContent="";await files();$("t-data").value=r.path;$("log").textContent="Saved "+r.path}catch(e){$("err").textContent=e.message}};
+$("b-cancel").onclick=()=>api("/api/cancel",{});
+$("b-refresh").onclick=files;
+function parse(t){fullLog+=t;
+  for(const m of t.matchAll(/step\s+(\d+)\/(\d+)\s+loss\s+([\d.]+)/g)){pts.push([+m[1],+m[3]]);total=+m[2]}
+  for(const m of t.matchAll(/step\s+(\d+)\s+validation loss\s+([\d.]+)/g))vals.push([+m[1],+m[2]])}
+function draw(){const c=$("chart"),x=c.getContext("2d"),W=c.width,H=c.height,css=getComputedStyle(document.body);
+  x.clearRect(0,0,W,H);const all=pts.concat(vals);if(!all.length){x.fillStyle=css.getPropertyValue("--mute");x.font="22px system-ui";x.fillText("loss curve appears here during training",30,H/2);return}
+  const mx=Math.max(total,...all.map(p=>p[0]),1),lo=Math.min(...all.map(p=>p[1])),hi=Math.max(...all.map(p=>p[1])),pad=40,sy=v=>H-pad-(v-lo)/((hi-lo)||1)*(H-2*pad),sx=v=>pad+v/mx*(W-pad-10);
+  x.strokeStyle=css.getPropertyValue("--line");x.fillStyle=css.getPropertyValue("--mute");x.font="18px system-ui";
+  for(let i=0;i<=4;i++){const v=lo+(hi-lo)*i/4,y=sy(v);x.beginPath();x.moveTo(pad,y);x.lineTo(W-10,y);x.stroke();x.fillText(v.toFixed(2),2,y+5)}
+  const line=(a,col,dots)=>{x.strokeStyle=col;x.fillStyle=col;x.lineWidth=3;x.beginPath();a.forEach((p,i)=>i?x.lineTo(sx(p[0]),sy(p[1])):x.moveTo(sx(p[0]),sy(p[1])));x.stroke();if(dots)a.forEach(p=>{x.beginPath();x.arc(sx(p[0]),sy(p[1]),5,0,7);x.fill()})};
+  line(pts,css.getPropertyValue("--acc"),false);line(vals,css.getPropertyValue("--acc2"),true)}
+async function poll(){clearTimeout(timer);
+  try{const j=await api("/api/job?since="+since);
+    if(j.id!==jobId){jobId=j.id}
+    if(j.text){parse(j.text);const l=$("log");const stick=l.scrollTop+l.clientHeight>=l.scrollHeight-20;l.textContent=fullLog.slice(-60000);if(stick)l.scrollTop=l.scrollHeight}
+    since=j.next;$("s-kind").textContent=j.kind||"none";
+    const last=pts[pts.length-1],lv=vals[vals.length-1];
+    $("s-step").textContent=last?last[0]+(total?"/"+total:""):"-";$("s-loss").textContent=last?last[1].toFixed(3):"-";$("s-val").textContent=lv?lv[1].toFixed(3):"-";
+    $("bar").firstElementChild.style.width=(last&&total?100*last[0]/total:j.running?5:0)+"%";
+    $("s-state").textContent=j.running?"running":j.exit===null?"idle":j.exit===0?"finished":"failed (exit "+j.exit+")";
+    $("b-cancel").disabled=!j.running;
+    if(j.kind==="generate"&&!j.running&&j.exit===0)$("bar").firstElementChild.style.width="100%";
+    draw();
+    if(j.running)timer=setTimeout(poll,500);else if(j.id)files()}
+  catch(e){$("err").textContent=e.message}}
+async function version(){try{const v=await api("/api/version");$("ver").textContent="version "+v.version}catch(e){}}
+let updReady=false;
+$("b-upd").onclick=async()=>{const b=$("b-upd");$("err").textContent="";
+  try{
+    if(!updReady){b.textContent="Checking...";const r=await api("/api/update/check");
+      if(r.available){updReady=true;b.textContent="Install build "+r.latest;b.classList.remove("ghost")}else b.textContent="Up to date";return}
+    b.textContent="Installing...";b.disabled=true;await api("/api/update",{});
+    b.textContent="Restarting...";
+    for(let i=0;i<60;i++){await new Promise(r=>setTimeout(r,1000));try{await api("/api/version");location.reload();return}catch(e){}}
+    b.textContent="Restart cpuforge by hand"}
+  catch(e){$("err").textContent=e.message;b.disabled=false;b.textContent="Check for updates";updReady=false}};
+draw();files();poll();version();
+</script></body></html>

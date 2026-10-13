@@ -1,0 +1,16 @@
+[package]
+name = "cf-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Weight loading (safetensors via mmap), Hugging Face directories, adapter files"
+
+[dependencies]
+memmap2 = "0.9"
+safetensors = "0.8"
+serde_json = "1"
+cf-core = { path = "../core" }
+cf-model = { path = "../model" }
+
+[dev-dependencies]
+tempfile = "3"

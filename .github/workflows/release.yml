@@ -1,0 +1,58 @@
+name: release
+# Every push to main: test, build Linux/Windows/macOS programs, publish them as release "build-N".
+# Installed copies (cpuforge update, the Update button, --auto-update) pick up the newest release.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --workspace --release
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64"
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-22.04, asset: cpuforge-linux-x64, bin: cpuforge, flags: "-C target-cpu=x86-64" }
+          - { os: windows-latest, asset: cpuforge-windows-x64.exe, bin: cpuforge.exe, flags: "-C target-cpu=x86-64" }
+          - { os: macos-latest, asset: cpuforge-macos-arm64, bin: cpuforge, flags: "-C target-cpu=generic" }
+    runs-on: ${{ matrix.os }}
+    env:
+      CPUFORGE_BUILD: ${{ github.run_number }}   # becomes the version: 0.N
+      RUSTFLAGS: ${{ matrix.flags }}             # portable; the matrix library picks AVX2/AVX-512/NEON at run time
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+      - name: stage
+        shell: bash
+        run: |
+          mkdir out
+          cp target/release/${{ matrix.bin }} out/${{ matrix.asset }}
+          cd out
+          if command -v sha256sum >/dev/null; then sha256sum ${{ matrix.asset }} > ${{ matrix.asset }}.sha256; else shasum -a 256 ${{ matrix.asset }} > ${{ matrix.asset }}.sha256; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: out/*
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" out/* \
+            --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --title "cpuforge 0.${{ github.run_number }}" --notes "${{ github.event.head_commit.message }}" --latest

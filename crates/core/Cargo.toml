@@ -1,0 +1,9 @@
+[package]
+name = "cf-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tensor basics, matmul and hand-written forward/backward ops for CPU training"
+
+[dependencies]
+gemm = "0.19"
