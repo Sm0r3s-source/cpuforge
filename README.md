@@ -39,7 +39,7 @@ Every push to `main` runs `.github/workflows/release.yml`: tests, then Linux, Wi
 - Repo is `Sm0r3s-source/cpuforge` unless `CPUFORGE_REPO=owner/repo` (or `--repo`) says otherwise. A private repo needs `CPUFORGE_TOKEN`.
 - Build on Windows for Windows; a headless Linux box needs the Linux asset, which the workflow builds.
 
-### Headless Linux box (Sbook)
+### Headless Linux box
 
 ```
 curl -fsSL https://raw.githubusercontent.com/Sm0r3s-source/cpuforge/main/scripts/install-sbook.sh | bash
