@@ -101,6 +101,8 @@ impl Grads {
                 .iter()
                 .map(|l| LayerGrads {
                     attn_norm: zeros_if(spec.base, d),
+                    q_norm: zeros_if(spec.base && l.q_norm.is_some(), m.dims.head_dim),
+                    k_norm: zeros_if(spec.base && l.k_norm.is_some(), m.dims.head_dim),
                     mlp_norm: zeros_if(spec.base, d),
                     wq: lin_grad(&l.wq, spec),
                     wk: lin_grad(&l.wk, spec),
@@ -118,6 +120,8 @@ impl Grads {
         let mut v = vec![&mut self.embed, &mut self.final_norm, &mut self.lm_head];
         for l in &mut self.layers {
             v.push(&mut l.attn_norm);
+            v.push(&mut l.q_norm);
+            v.push(&mut l.k_norm);
             v.push(&mut l.mlp_norm);
             for g in [&mut l.wq, &mut l.wk, &mut l.wv, &mut l.wo, &mut l.gate, &mut l.up, &mut l.down] {
                 v.push(&mut g.w);
@@ -174,7 +178,7 @@ fn visit_linear(name: &str, lin: &mut Linear, g: Option<&LinGrad>, f: &mut Param
 /// parameter/gradient pairing cannot drift.
 pub fn visit_params(m: &mut Model, grads: Option<&Grads>, f: &mut ParamVisitor) {
     let e: &[f32] = &[];
-    let d = m.dims.d;
+    let (d, hd) = (m.dims.d, m.dims.head_dim);
     let embed_shape = m.embed.shape().to_vec();
     f("model.embed_tokens.weight", &embed_shape, m.embed.data_mut(), grads.map_or(e, |g| &g.embed));
     for (i, l) in m.layers.iter_mut().enumerate() {
@@ -182,7 +186,13 @@ pub fn visit_params(m: &mut Model, grads: Option<&Grads>, f: &mut ParamVisitor) 
         let p = format!("model.layers.{i}");
         f(&format!("{p}.input_layernorm.weight"), &[d], &mut l.attn_norm, lg.map_or(e, |g| &g.attn_norm));
         visit_linear(&format!("{p}.self_attn.q_proj"), &mut l.wq, lg.map(|g| &g.wq), f);
+        if let Some(w) = &mut l.q_norm {
+            f(&format!("{p}.self_attn.q_norm.weight"), &[hd], w, lg.map_or(e, |g| &g.q_norm));
+        }
         visit_linear(&format!("{p}.self_attn.k_proj"), &mut l.wk, lg.map(|g| &g.wk), f);
+        if let Some(w) = &mut l.k_norm {
+            f(&format!("{p}.self_attn.k_norm.weight"), &[hd], w, lg.map_or(e, |g| &g.k_norm));
+        }
         visit_linear(&format!("{p}.self_attn.v_proj"), &mut l.wv, lg.map(|g| &g.wv), f);
         visit_linear(&format!("{p}.self_attn.o_proj"), &mut l.wo, lg.map(|g| &g.wo), f);
         f(&format!("{p}.post_attention_layernorm.weight"), &[d], &mut l.mlp_norm, lg.map_or(e, |g| &g.mlp_norm));
@@ -226,7 +236,8 @@ impl Model {
         lm_head: Option<Tensor>,
     ) -> Self {
         let dims = Self::dims_of(&cfg);
-        let rope = RopeCache::new(dims.head_dim, max_seq, cfg.rope_theta);
+        let scaling = cfg.llama3_scaling().expect("validated config");
+        let rope = RopeCache::with_scaling(dims.head_dim, max_seq, cfg.rope_theta, scaling);
         Model { cfg, lora_cfg: None, dims, max_seq, embed, layers, final_norm, lm_head, rope }
     }
 
@@ -246,6 +257,8 @@ impl Model {
                 wk: Linear::new(take(&mut t, &format!("{p}.self_attn.k_proj.weight"), &[kvd, d])?),
                 wv: Linear::new(take(&mut t, &format!("{p}.self_attn.v_proj.weight"), &[kvd, d])?),
                 wo: Linear::new(take(&mut t, &format!("{p}.self_attn.o_proj.weight"), &[d, qd])?),
+                q_norm: if cfg.qk_norm() { Some(take(&mut t, &format!("{p}.self_attn.q_norm.weight"), &[dm.head_dim])?.data().to_vec()) } else { None },
+                k_norm: if cfg.qk_norm() { Some(take(&mut t, &format!("{p}.self_attn.k_norm.weight"), &[dm.head_dim])?.data().to_vec()) } else { None },
                 mlp_norm: take(&mut t, &format!("{p}.post_attention_layernorm.weight"), &[d])?.data().to_vec(),
                 gate: Linear::new(take(&mut t, &format!("{p}.mlp.gate_proj.weight"), &[f, d])?),
                 up: Linear::new(take(&mut t, &format!("{p}.mlp.up_proj.weight"), &[f, d])?),
@@ -278,6 +291,8 @@ impl Model {
                 wk: lin(kvd, d),
                 wv: lin(kvd, d),
                 wo: lin(d, qd),
+                q_norm: cfg.qk_norm().then(|| vec![1.0; dm.head_dim]),
+                k_norm: cfg.qk_norm().then(|| vec![1.0; dm.head_dim]),
                 mlp_norm: vec![1.0; d],
                 gate: lin(f, d),
                 up: lin(f, d),

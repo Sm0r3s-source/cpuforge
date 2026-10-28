@@ -12,6 +12,11 @@ pub fn peak_rss_mb() -> Option<f64> {
     Some(kb / 1024.0)
 }
 
+/// Attach an adapter that is either a cpuforge `.safetensors` file or a PEFT-style folder (as Brewery uses).
+pub fn load_any_adapter(model: &mut cf_model::Model, path: &Path) -> Result<(), String> {
+    if path.is_dir() { cf_io::load_peft_adapter(model, path) } else { cf_io::load_adapter(model, path) }
+}
+
 /// `"bytes"` gives the byte-level tokenizer; anything else is a tokenizer.json path.
 pub fn load_tokenizer(spec: &str) -> Result<Box<dyn Tokenizer>, String> {
     if spec == "bytes" {

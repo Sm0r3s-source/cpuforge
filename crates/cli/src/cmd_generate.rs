@@ -7,12 +7,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use cf_core::rng::Rng;
-use cf_io::{load_adapter, load_model};
+use cf_io::load_model;
 use cf_model::Model;
 use cf_train::Tokenizer;
 
 use crate::args::Args;
-use crate::util::{load_tokenizer, sample};
+use crate::util::{load_any_adapter, load_tokenizer, sample};
 
 /// Generate up to `max_new` tokens after `prompt`, calling `on_token` with each new id.
 #[allow(clippy::too_many_arguments)]
@@ -62,7 +62,7 @@ pub fn run(args: &Args) -> Result<(), String> {
     let prompt_len = tok.encode(&prompt)?.len();
     let mut model = load_model(&dir, prompt_len + max_new + 1)?;
     if let Some(a) = args.get("adapter") {
-        load_adapter(&mut model, Path::new(a))?;
+        load_any_adapter(&mut model, Path::new(a))?;
     }
 
     print!("{prompt}");

@@ -287,3 +287,104 @@ fn last_logits_equals_the_last_row_of_full_logits() {
         assert!((a - b).abs() < 1e-5);
     }
 }
+
+// ---- Qwen3 (per-head q/k norm, head_dim != hidden/heads) and Llama-3 rope scaling ----
+
+fn qwen_cfg(extra: &str) -> LlamaConfig {
+    LlamaConfig::from_json(&format!(
+        r#"{{"model_type":"qwen3","vocab_size":13,"hidden_size":16,"intermediate_size":24,"num_hidden_layers":2,
+            "num_attention_heads":4,"num_key_value_heads":2,"head_dim":6,"rms_norm_eps":1e-6,
+            "rope_theta":1000000.0,"max_position_embeddings":32,"tie_word_embeddings":true{extra}}}"#
+    ))
+    .unwrap()
+}
+
+fn qwen_model(seed: u64, extra: &str) -> Model {
+    let mut m = Model::random(qwen_cfg(extra), 32, seed, 0.3);
+    let mut rng = Rng::new(seed + 1);
+    for l in &mut m.layers {
+        l.attn_norm.iter_mut().for_each(|w| *w = 1.0 + 0.2 * rng.normal());
+        l.mlp_norm.iter_mut().for_each(|w| *w = 1.0 + 0.2 * rng.normal());
+        for w in [l.q_norm.as_mut().unwrap(), l.k_norm.as_mut().unwrap()] {
+            w.iter_mut().for_each(|x| *x = 1.0 + 0.3 * rng.normal());
+        }
+    }
+    m.final_norm.iter_mut().for_each(|w| *w = 1.0 + 0.2 * rng.normal());
+    m
+}
+
+#[test]
+fn qwen3_shapes_follow_head_dim_not_hidden_over_heads() {
+    let m = qwen_model(1, "");
+    assert_eq!((m.dims.q_dim(), m.dims.kv_dim(), m.dims.d), (24, 12, 16));
+    assert_eq!(m.layers[0].wq.w.shape(), &[24, 16]);
+    assert_eq!(m.layers[0].wo.w.shape(), &[16, 24]);
+    assert_eq!(m.layers[0].q_norm.as_ref().unwrap().len(), 6);
+}
+
+#[test]
+fn qwen3_full_finetune_gradients_including_qk_norm_weights() {
+    let mut m = qwen_model(2, "");
+    check_against_finite_differences(&mut m, TrainSpec { base: true, embed: true, lora: false }, "qwen3/full");
+    // The check only visits tensors with gradients, so make sure the qk norms were among them.
+    let g = Grads::new(&m, TrainSpec { base: true, embed: true, lora: false });
+    assert_eq!((g.layers[0].q_norm.len(), g.layers[0].k_norm.len()), (6, 6));
+}
+
+#[test]
+fn qwen3_lora_gradients_pass_through_the_norms_and_leave_them_frozen() {
+    let mut m = qwen_model(3, "");
+    all_lora(&mut m, 30);
+    check_against_finite_differences(&mut m, TrainSpec::LORA_ONLY, "qwen3/lora");
+    let g = Grads::new(&m, TrainSpec::LORA_ONLY);
+    assert!(g.layers[0].q_norm.is_empty() && g.layers[0].k_norm.is_empty());
+}
+
+#[test]
+fn qwen3_checkpoint_mode_gives_identical_gradients() {
+    let mut m = qwen_model(4, "");
+    all_lora(&mut m, 40);
+    let mut full = Grads::new(&m, TrainSpec::FULL);
+    let mut ckpt = Grads::new(&m, TrainSpec::FULL);
+    let l1 = m.forward_backward(&TOKENS, &TARGETS, &mut full, MemoryMode::Full);
+    let l2 = m.forward_backward(&TOKENS, &TARGETS, &mut ckpt, MemoryMode::Checkpoint);
+    assert_eq!(l1, l2);
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    visit_params(&mut m, Some(&full), &mut |_, _, _, g| a.extend_from_slice(g));
+    visit_params(&mut m, Some(&ckpt), &mut |_, _, _, g| b.extend_from_slice(g));
+    assert_eq!(a.len(), b.len());
+    assert!(a.iter().zip(&b).all(|(x, y)| (x - y).abs() <= 1e-6 * (1.0 + x.abs())));
+}
+
+#[test]
+fn qk_norm_changes_the_function() {
+    // Same weights, once with the norms as identity-ish (weights 1) and once perturbed: outputs must differ.
+    let a = qwen_model(5, "");
+    let mut b = qwen_model(5, "");
+    b.layers[0].q_norm.as_mut().unwrap()[0] += 0.5;
+    assert_ne!(a.logits(&TOKENS), b.logits(&TOKENS));
+}
+
+#[test]
+fn qwen3_from_named_requires_the_norm_tensors_and_roundtrips() {
+    use std::collections::HashMap;
+    let mut m = qwen_model(6, "");
+    let mut map: HashMap<String, cf_core::Tensor> = HashMap::new();
+    visit_params(&mut m, None, &mut |name, shape, p, _| {
+        map.insert(name.to_string(), cf_core::Tensor::from_vec(p.to_vec(), shape));
+    });
+    assert!(map.contains_key("model.layers.1.self_attn.q_norm.weight") && map.contains_key("model.layers.1.self_attn.k_norm.weight"));
+    let rebuilt = Model::from_named(m.cfg.clone(), 32, map.clone()).unwrap();
+    assert_eq!(m.logits(&TOKENS), rebuilt.logits(&TOKENS));
+    map.remove("model.layers.0.self_attn.k_norm.weight");
+    assert!(Model::from_named(m.cfg.clone(), 32, map).err().expect("should fail").contains("k_norm"));
+}
+
+#[test]
+fn llama3_rope_scaling_trains_correctly_and_differs_from_plain_rope() {
+    let scaling = r#","rope_scaling":{"rope_type":"llama3","factor":8.0,"low_freq_factor":1.0,"high_freq_factor":4.0,"original_max_position_embeddings":16}"#;
+    let mut scaled = qwen_model(7, scaling);
+    check_against_finite_differences(&mut scaled, TrainSpec { base: true, embed: true, lora: false }, "llama3-rope");
+    let plain = qwen_model(7, "");
+    assert_ne!(plain.logits(&TOKENS), scaled.logits(&TOKENS));
+}

@@ -183,6 +183,7 @@ fn evaluation_and_events_fire_on_schedule() {
             evals.push(*step)
         }
         Event::Saved { step, .. } => saves.push(*step),
+        Event::Micro { .. } => {}
     })
     .unwrap();
     assert_eq!(steps, vec![2, 4, 6]);
@@ -195,4 +196,62 @@ fn evaluation_and_events_fire_on_schedule() {
 fn empty_dataset_is_an_error() {
     let mut t = Trainer::new(Model::random(cfg(), 64, 8, 0.1), TrainSpec::FULL, train_cfg(1));
     assert!(t.train(&Dataset::default(), None, None, &mut |_| {}).is_err());
+}
+
+#[test]
+fn stopping_mid_step_saves_state_and_resuming_matches_an_uninterrupted_run() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let d = data();
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.safetensors");
+    let mk = || {
+        let mut m = Model::random(cfg(), 64, 4, 0.1);
+        m.add_lora(4, 8.0, &["q", "v", "down"], 9).unwrap();
+        m
+    };
+    let mut straight = Trainer::new(mk(), TrainSpec::LORA_ONLY, train_cfg(6));
+    let straight_losses = run(&mut straight, &d);
+
+    // Ask to stop after 5 sequences = 2 full steps (batch 2) plus one sequence of step 3.
+    let seen = Rc::new(Cell::new(0usize));
+    let mut first = Trainer::new(mk(), TrainSpec::LORA_ONLY, train_cfg(6));
+    let s2 = seen.clone();
+    first.should_stop = Some(Box::new(move || s2.get() >= 5));
+    let mut saved = 0;
+    first
+        .train(&d, None, Some(&state), &mut |e| match e {
+            Event::Micro { .. } => seen.set(seen.get() + 1),
+            Event::Saved { .. } => saved += 1,
+            _ => {}
+        })
+        .unwrap();
+    assert!(first.stopped);
+    assert_eq!((first.step, first.consumed), (2, 4), "the half-finished step is dropped");
+    assert_eq!(saved, 1);
+
+    let mut second = Trainer::new(mk(), TrainSpec::LORA_ONLY, train_cfg(6));
+    second.resume(&state).unwrap();
+    assert_eq!((second.step, second.consumed), (2, 4));
+    let resumed = run(&mut second, &d);
+    assert!(!second.stopped);
+    assert_eq!(resumed.len(), 4);
+    for (x, y) in straight_losses[2..].iter().zip(&resumed) {
+        assert!((x - y).abs() < 1e-5, "{x} vs {y}");
+    }
+}
+
+#[test]
+fn micro_events_count_every_sequence() {
+    let d = data();
+    let model = Model::random(cfg(), 64, 1, 0.1);
+    let mut t = Trainer::new(model, TrainSpec::FULL, train_cfg(2));
+    let mut micro = Vec::new();
+    t.train(&d, None, None, &mut |e| {
+        if let Event::Micro { step, done, of } = e {
+            micro.push((*step, *done, *of));
+        }
+    })
+    .unwrap();
+    assert_eq!(micro, vec![(1, 1, 2), (1, 2, 2), (2, 1, 2), (2, 2, 2)]);
 }

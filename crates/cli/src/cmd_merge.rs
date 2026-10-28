@@ -5,9 +5,10 @@
 
 use std::path::{Path, PathBuf};
 
-use cf_io::{load_adapter, load_model, save_model};
+use cf_io::{load_model, save_model};
 
 use crate::args::Args;
+use crate::util::load_any_adapter;
 
 const SIDE_FILES: &[&str] = &["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "generation_config.json"];
 
@@ -17,7 +18,7 @@ pub fn run(args: &Args) -> Result<(), String> {
     let out = PathBuf::from(args.require("out")?);
 
     let mut model = load_model(&model_dir, 16)?;
-    load_adapter(&mut model, Path::new(adapter))?;
+    load_any_adapter(&mut model, Path::new(adapter))?;
     model.merge_lora();
     save_model(&out, &mut model)?;
 

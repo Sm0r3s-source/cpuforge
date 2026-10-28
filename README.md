@@ -2,8 +2,9 @@
 
 Finetune (and train small) Llama-style language models on a CPU, in Rust. No GPU, no PyTorch.
 
-Supports the Llama family layout (RMSNorm, RoPE, grouped-query attention, SwiGLU): Llama, SmolLM, Mistral-style
-models. Hand-written forward and backward passes, LoRA or full finetuning, resumable checkpoints.
+Supports the Llama family layout (RMSNorm, RoPE, grouped-query attention, SwiGLU): Llama (including 3.x rope scaling),
+SmolLM, Mistral-style and Qwen3 models. Hand-written forward and backward passes, LoRA or full finetuning,
+resumable checkpoints. Can run as the CPU training engine behind [Brewery](docs/brewery.md).
 
 ```
 cargo build --release
@@ -20,6 +21,10 @@ cargo build --release
 | Interrupt and resume | resumed run matches an uninterrupted run |
 | Hugging Face directory loading (single file, sharded, bf16/f16), adapter files | round-trip tested |
 | End-to-end CLI: init, train (full and LoRA), resume, generate, merge | tested on the real binary |
+| Qwen3 (per-head q/k RMSNorm, explicit head_dim) | backward checked against finite differences; a deliberately wrong q-norm backward fails the tests |
+| Llama 3.x rope scaling | frequency rule unit-tested and used in the whole-model tests; the formula was written from the Hugging Face definition and **not** compared against it |
+| Brewery worker (`cpuforge worker`): status.json, metrics.jsonl, STOP file / SIGTERM, resume, PEFT adapter output | tested on the real binary, and from Brewery's own `brewery train` |
+| `cpuforge pull` (model download) | tested against a fake Hugging Face server (partial files, gated models, hostile file names); never run against the real site |
 | **Matching PyTorch/transformers on a real model** | **not yet run.** The sandbox this was built in cannot reach huggingface.co. Run the parity check below on your machine. |
 
 ## The app
@@ -94,6 +99,8 @@ Measured with `cpuforge bench-train` on a **2-core cloud VM** (random SmolLM-135
 Peak memory 1.7 GB. Roughly: 1M training tokens in about 2.3 hours on 2 cores for a 135M model, and it should scale with
 cores. Matmul runs at 120-150 GFLOP/s here (`cpuforge bench`). These are not numbers for your machine: run the benchmark.
 
+Qwen3-0.6B-shaped model (596M params, random fp16 weights in the real Qwen3 tensor layout, LoRA rank 16 on all projections, checkpoint mode, 256-token sequences) on the same 2 cores: about 22 tokens/s, 3.5 GB peak RAM.
+
 ## Layout
 
 | crate | purpose |
@@ -111,8 +118,9 @@ frozen base weight costs no weight-gradient matmul.
 
 ## Not supported yet
 
-- Models with attention biases (Qwen2) or `rope_scaling` (Llama 3.1): the loader refuses them with a clear error rather than silently computing wrong numbers.
+- Models with attention biases (Qwen2), other `rope_scaling` types (yarn, linear, ...), Gemma, MoE: the loader refuses them with a clear error rather than silently computing wrong numbers.
 - KV cache: `generate` recomputes the sequence per token, fine for checking a finetune, slow for long outputs.
 - Quantized base weights (the main way to fit 0.5B+ models in little RAM), GGUF loading.
 - Batching several sequences into one forward pass; logits are materialised as `[tokens, vocab]`, which is large for 150k-token vocabularies.
-- Gradient accumulation averages per-sequence mean losses rather than weighting by token count.
+- Gradient accumulation averages per-sequence mean losses rather than weighting by token count (recent Hugging Face trainers weight by token count, so loss values and gradient scale differ slightly on uneven batches).
+- DPO and preference data.

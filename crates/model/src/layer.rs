@@ -36,6 +36,9 @@ pub struct Layer {
     pub wk: Linear,
     pub wv: Linear,
     pub wo: Linear,
+    /// Qwen3: per-head RMSNorm weights `[head_dim]` applied to q and k before RoPE.
+    pub q_norm: Option<Vec<f32>>,
+    pub k_norm: Option<Vec<f32>>,
     pub mlp_norm: Vec<f32>,
     pub gate: Linear,
     pub up: Linear,
@@ -45,6 +48,8 @@ pub struct Layer {
 #[derive(Default, Clone)]
 pub struct LayerGrads {
     pub attn_norm: Vec<f32>,
+    pub q_norm: Vec<f32>,
+    pub k_norm: Vec<f32>,
     pub mlp_norm: Vec<f32>,
     pub wq: LinGrad,
     pub wk: LinGrad,
@@ -63,6 +68,11 @@ pub struct LayerCache {
     q: Vec<f32>,
     k: Vec<f32>,
     v: Vec<f32>,
+    /// q/k before the Qwen3 head norm, and that norm's 1/rms (unused otherwise).
+    q_pre: Vec<f32>,
+    k_pre: Vec<f32>,
+    q_rstd: Vec<f32>,
+    k_rstd: Vec<f32>,
     attn_o: Vec<f32>,
     lse: Vec<f32>,
     x_mid: Vec<f32>,
@@ -91,6 +101,17 @@ impl Layer {
         self.wq.forward(&c.n1, t, &mut c.q, &mut c.xs[0]);
         self.wk.forward(&c.n1, t, &mut c.k, &mut c.xs[1]);
         self.wv.forward(&c.n1, t, &mut c.v, &mut c.xs[2]);
+        if let (Some(qn), Some(kn)) = (&self.q_norm, &self.k_norm) {
+            let hd = dm.head_dim;
+            std::mem::swap(&mut c.q, &mut c.q_pre);
+            std::mem::swap(&mut c.k, &mut c.k_pre);
+            c.q.resize(t * qd, 0.0);
+            c.k.resize(t * kvd, 0.0);
+            c.q_rstd.resize(t * dm.heads, 0.0);
+            c.k_rstd.resize(t * dm.kv_heads, 0.0);
+            rmsnorm_forward(&c.q_pre, qn, &mut c.q, &mut c.q_rstd, t * dm.heads, hd, dm.eps);
+            rmsnorm_forward(&c.k_pre, kn, &mut c.k, &mut c.k_rstd, t * dm.kv_heads, hd, dm.eps);
+        }
         rope.apply(&mut c.q, t, dm.heads, 0, false);
         rope.apply(&mut c.k, t, dm.kv_heads, 0, false);
 
@@ -169,6 +190,20 @@ impl Layer {
         // Rotation backward = inverse rotation.
         rope.apply(&mut dq, t, dm.heads, 0, true);
         rope.apply(&mut dk, t, dm.kv_heads, 0, true);
+
+        // Qwen3: back through the per-head norms (dq/dk are now gradients of the pre-norm q/k).
+        if let (Some(qn), Some(kn)) = (&self.q_norm, &self.k_norm) {
+            let hd = dm.head_dim;
+            let (mut dq_pre, mut dk_pre) = (vec![0.0f32; t * qd], vec![0.0f32; t * kvd]);
+            let mut s = Vec::new();
+            let dw = norm_grad(&mut lg.q_norm, &mut s, hd);
+            rmsnorm_backward(&dq, &c.q_pre, qn, &c.q_rstd, &mut dq_pre, dw, t * dm.heads, hd);
+            let mut s = Vec::new();
+            let dw = norm_grad(&mut lg.k_norm, &mut s, hd);
+            rmsnorm_backward(&dk, &c.k_pre, kn, &c.k_rstd, &mut dk_pre, dw, t * dm.kv_heads, hd);
+            dq = dq_pre;
+            dk = dk_pre;
+        }
 
         let mut dn1 = vec![0.0f32; t * d];
         self.wq.backward(&c.n1, &c.xs[0], &dq, t, &mut dn1, &mut lg.wq);

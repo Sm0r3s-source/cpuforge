@@ -71,6 +71,8 @@ pub struct StepStats {
 
 #[derive(Clone, Debug)]
 pub enum Event {
+    /// One more sequence of the current step is done (steps can take minutes on big models).
+    Micro { step: usize, done: usize, of: usize },
     Step(StepStats),
     Eval { step: usize, val_loss: f32 },
     Saved { step: usize, path: PathBuf },
@@ -85,6 +87,10 @@ pub struct Trainer {
     pub step: usize,
     /// Examples drawn from the (shuffled, repeating) training stream so far.
     pub consumed: u64,
+    /// Polled between sequences; when it returns true the run saves its state and returns.
+    pub should_stop: Option<Box<dyn Fn() -> bool>>,
+    /// Set by `train` when it returned early because `should_stop` fired.
+    pub stopped: bool,
 }
 
 /// Mean loss over up to `max_examples` examples (all of them when 0).
@@ -101,7 +107,7 @@ impl Trainer {
     pub fn new(model: Model, spec: TrainSpec, cfg: TrainConfig) -> Self {
         let grads = Grads::new(&model, spec);
         let opt = AdamW::new(cfg.beta1, cfg.beta2, cfg.eps, cfg.weight_decay);
-        Trainer { model, opt, grads, cfg, step: 0, consumed: 0 }
+        Trainer { model, opt, grads, cfg, step: 0, consumed: 0, should_stop: None, stopped: false }
     }
 
     /// Restore progress from a state file written by `save`.
@@ -132,11 +138,23 @@ impl Trainer {
         let mut cached_epoch = u64::MAX;
         let mut order: Vec<usize> = Vec::new();
 
-        while self.step < self.cfg.steps {
+        self.stopped = false;
+        'steps: while self.step < self.cfg.steps {
             let started = Instant::now();
             self.grads.zero();
             let (mut loss_sum, mut tokens) = (0.0f32, 0usize);
-            for _ in 0..self.cfg.batch {
+            let consumed_at_start = self.consumed;
+            for done in 0..self.cfg.batch {
+                if self.should_stop.as_ref().is_some_and(|f| f()) {
+                    // Drop the half-accumulated step so a resumed run repeats it exactly.
+                    self.consumed = consumed_at_start;
+                    self.stopped = true;
+                    if let Some(p) = state_path {
+                        self.save(p)?;
+                        on_event(&Event::Saved { step: self.step, path: p.to_path_buf() });
+                    }
+                    break 'steps;
+                }
                 let (epoch, pos) = (self.consumed / n, (self.consumed % n) as usize);
                 if epoch != cached_epoch {
                     order = data.order(self.cfg.seed, epoch);
@@ -146,6 +164,7 @@ impl Trainer {
                 loss_sum += self.model.forward_backward(&ex.tokens, &ex.targets, &mut self.grads, self.cfg.memory);
                 tokens += ex.tokens.len();
                 self.consumed += 1;
+                on_event(&Event::Micro { step: self.step + 1, done: done + 1, of: self.cfg.batch });
             }
             self.grads.scale(1.0 / self.cfg.batch as f32);
             let grad_norm = self.grads.global_norm();

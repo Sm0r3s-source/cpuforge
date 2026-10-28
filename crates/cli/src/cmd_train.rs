@@ -224,6 +224,7 @@ pub fn run(args: &Args) -> Result<(), String> {
             );
             let _ = writeln!(csv, "{},{},{},{},{}", s.step, s.loss, s.lr, s.grad_norm, s.tokens_per_sec);
         }
+        Event::Micro { .. } => {}
         Event::Eval { step, val_loss } => println!("step {step:>5}  validation loss {val_loss:.4}"),
         Event::Saved { step, path } => println!("step {step:>5}  saved {}", path.display()),
     })?;

@@ -73,6 +73,75 @@ pub fn save_adapter(path: &Path, model: &mut Model) -> Result<(), String> {
     write_safetensors(path, &refs, meta)
 }
 
+/// Short LoRA target name (`q`) <-> Hugging Face module name (`q_proj`).
+fn proj_name(short: &str) -> String {
+    format!("{short}_proj")
+}
+
+/// Write the adapter in the layout Hugging Face PEFT reads (`adapter_config.json` +
+/// `adapter_model.safetensors`), so other tools can load, merge or publish it.
+pub fn save_peft_adapter(dir: &Path, model: &mut Model, base_model: &str) -> Result<(), String> {
+    let lc = model.lora_cfg.clone().ok_or("model has no LoRA adapters")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let mut owned: Vec<(String, Vec<usize>, Vec<f32>)> = Vec::new();
+    visit_params(model, None, &mut |name, shape, data, _| {
+        if name.contains(".lora_") {
+            owned.push((format!("base_model.model.{name}.weight"), shape.to_vec(), data.to_vec()));
+        }
+    });
+    let refs: Vec<(String, Vec<usize>, &[f32])> = owned.iter().map(|(n, s, d)| (n.clone(), s.clone(), d.as_slice())).collect();
+    let mut meta = HashMap::new();
+    meta.insert("format".to_string(), "pt".to_string());
+    write_safetensors(&dir.join("adapter_model.safetensors"), &refs, meta)?;
+    let cfg = serde_json::json!({
+        "peft_type": "LORA", "task_type": "CAUSAL_LM", "base_model_name_or_path": base_model,
+        "r": lc.rank, "lora_alpha": lc.alpha, "lora_dropout": 0.0, "bias": "none",
+        "target_modules": lc.targets.iter().map(|s| proj_name(s)).collect::<Vec<_>>(),
+        "fan_in_fan_out": false, "inference_mode": true, "use_rslora": false, "use_dora": false,
+    });
+    std::fs::write(dir.join("adapter_config.json"), serde_json::to_string_pretty(&cfg).unwrap()).map_err(|e| e.to_string())
+}
+
+/// Attach adapters to `model` from a PEFT-style directory (the inverse of `save_peft_adapter`).
+pub fn load_peft_adapter(model: &mut Model, dir: &Path) -> Result<(), String> {
+    let cfg_text = std::fs::read_to_string(dir.join("adapter_config.json")).map_err(|e| format!("cannot read adapter_config.json in {}: {e}", dir.display()))?;
+    let cfg: serde_json::Value = serde_json::from_str(&cfg_text).map_err(|e| format!("bad adapter_config.json: {e}"))?;
+    if cfg["peft_type"] != "LORA" {
+        return Err("only LoRA adapters are supported".into());
+    }
+    if cfg["use_dora"] == true || cfg["use_rslora"] == true {
+        return Err("DoRA / rsLoRA adapters are not supported".into());
+    }
+    let rank = cfg["r"].as_u64().ok_or("adapter_config.json lacks r")? as usize;
+    let alpha = cfg["lora_alpha"].as_f64().ok_or("adapter_config.json lacks lora_alpha")? as f32;
+    let mods: Vec<String> = cfg["target_modules"].as_array().ok_or("adapter_config.json lacks target_modules")?.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    let targets: Vec<&str> = mods.iter().map(|m| m.strip_suffix("_proj").unwrap_or(m)).collect();
+    model.add_lora(rank, alpha, &targets, 0)?;
+    let loaded = read_safetensors(&dir.join("adapter_model.safetensors"))?;
+    let (mut err, mut seen) = (None::<String>, 0usize);
+    visit_params(model, None, &mut |name, shape, data, _| {
+        if !name.contains(".lora_") || err.is_some() {
+            return;
+        }
+        let key = format!("base_model.model.{name}.weight");
+        match loaded.tensors.get(&key) {
+            None => err = Some(format!("adapter file is missing '{key}'")),
+            Some(t) if t.shape() != shape => err = Some(format!("adapter tensor '{key}' has shape {:?}, expected {:?}", t.shape(), shape)),
+            Some(t) => {
+                data.copy_from_slice(t.data());
+                seen += 1;
+            }
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    if seen != loaded.tensors.len() {
+        return Err(format!("adapter file has {} tensors but the model uses {seen}", loaded.tensors.len()));
+    }
+    Ok(())
+}
+
 /// Attach adapters to `model` and fill them from a file written by `save_adapter`.
 pub fn load_adapter(model: &mut Model, path: &Path) -> Result<(), String> {
     let loaded = read_safetensors(path)?;
@@ -204,6 +273,55 @@ mod tests {
         load_adapter(&mut fresh, &path).unwrap();
         assert_eq!(fresh.logits(&TOK), want);
         assert_eq!(fresh.lora_cfg, base.lora_cfg);
+    }
+
+    #[test]
+    fn peft_adapter_roundtrips_with_peft_names_and_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut base = Model::random(cfg(), 32, 4, 0.3);
+        base.add_lora(3, 6.0, &["q", "v", "down"], 7).unwrap();
+        let mut rng = Rng::new(8);
+        for l in &mut base.layers {
+            for lin in [&mut l.wq, &mut l.wv, &mut l.down] {
+                lin.lora.as_mut().unwrap().b.data_mut().iter_mut().for_each(|v| *v = rng.normal() * 0.3);
+            }
+        }
+        let want = base.logits(&TOK);
+        save_peft_adapter(dir.path(), &mut base, "org/base").unwrap();
+
+        let c: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("adapter_config.json")).unwrap()).unwrap();
+        assert_eq!((c["peft_type"].as_str(), c["r"].as_u64(), c["lora_alpha"].as_f64()), (Some("LORA"), Some(3), Some(6.0)));
+        assert_eq!(c["base_model_name_or_path"], "org/base");
+        assert_eq!(c["target_modules"], serde_json::json!(["q_proj", "v_proj", "down_proj"]));
+        let names: Vec<String> = read_safetensors(&dir.path().join("adapter_model.safetensors")).unwrap().tensors.keys().cloned().collect();
+        assert!(names.contains(&"base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight".to_string()), "{names:?}");
+        assert!(names.contains(&"base_model.model.model.layers.1.mlp.down_proj.lora_B.weight".to_string()));
+        assert_eq!(names.len(), 2 * 3 * 2); // A and B, three modules, two layers
+
+        let mut fresh = Model::random(cfg(), 32, 4, 0.3);
+        load_peft_adapter(&mut fresh, dir.path()).unwrap();
+        assert_eq!(fresh.logits(&TOK), want);
+        std::fs::write(dir.path().join("adapter_config.json"), c.to_string().replace("LORA", "IA3")).unwrap();
+        let mut again = Model::random(cfg(), 32, 4, 0.3);
+        assert!(load_peft_adapter(&mut again, dir.path()).is_err());
+    }
+
+    #[test]
+    fn qwen3_model_saves_and_loads_with_norms_and_model_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let qcfg = LlamaConfig::from_json(
+            r#"{"model_type":"qwen3","vocab_size":13,"hidden_size":16,"intermediate_size":24,"num_hidden_layers":2,
+                "num_attention_heads":4,"num_key_value_heads":2,"head_dim":6,"max_position_embeddings":32,"tie_word_embeddings":true}"#,
+        )
+        .unwrap();
+        let mut m = Model::random(qcfg, 32, 9, 0.3);
+        m.layers[1].k_norm.as_mut().unwrap()[2] = 1.7;
+        save_model(dir.path(), &mut m).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+        assert!(text.contains(r#""model_type": "qwen3""#), "{text}");
+        let loaded = load_model(dir.path(), 16).unwrap();
+        assert_eq!(m.logits(&TOK), loaded.logits(&TOK));
+        assert_eq!(loaded.layers[1].k_norm.as_ref().unwrap()[2], 1.7);
     }
 
     #[test]

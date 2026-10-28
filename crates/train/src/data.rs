@@ -142,6 +142,48 @@ impl Dataset {
         Ok(Dataset { examples })
     }
 
+    /// Already-tokenized JSON lines, as produced by Brewery: `{"input_ids": [...], "labels": [...]}`
+    /// with `labels` aligned to `input_ids` (Hugging Face convention, -100 = no loss). The shift
+    /// by one happens here. Sequences longer than `seq_len + 1` tokens are cut.
+    pub fn from_tokenized_jsonl(text: &str, seq_len: usize) -> Result<Dataset, String> {
+        let mut examples = Vec::new();
+        for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+            let v: serde_json::Value = serde_json::from_str(line).map_err(|e| format!("line {}: {e}", n + 1))?;
+            let ints = |k: &str| -> Result<Vec<i64>, String> {
+                v.get(k)
+                    .and_then(|x| x.as_array())
+                    .ok_or_else(|| format!("line {}: missing \"{k}\" array", n + 1))?
+                    .iter()
+                    .map(|x| x.as_i64().ok_or_else(|| format!("line {}: \"{k}\" must hold integers", n + 1)))
+                    .collect()
+            };
+            let (ids, labels) = (ints("input_ids")?, ints("labels")?);
+            if ids.len() != labels.len() {
+                return Err(format!("line {}: input_ids has {} entries but labels has {}", n + 1, ids.len(), labels.len()));
+            }
+            if let Some(bad) = ids.iter().find(|&&i| !(0..=u32::MAX as i64).contains(&i)) {
+                return Err(format!("line {}: invalid token id {bad}", n + 1));
+            }
+            let keep = ids.len().min(seq_len + 1);
+            if keep < 2 {
+                continue;
+            }
+            let e = Example {
+                tokens: ids[..keep - 1].iter().map(|&i| i as u32).collect(),
+                targets: labels[1..keep].iter().map(|&l| if l < 0 { IGNORE_INDEX } else { l }).collect(),
+            };
+            if e.targets.iter().any(|&t| t != IGNORE_INDEX) {
+                examples.push(e);
+            }
+        }
+        Ok(Dataset { examples })
+    }
+
+    /// Largest token id used as an input or a target (to check against the model's vocabulary).
+    pub fn max_token_id(&self) -> Option<i64> {
+        self.examples.iter().flat_map(|e| e.tokens.iter().map(|&t| t as i64).chain(e.targets.iter().copied())).max()
+    }
+
     pub fn len(&self) -> usize {
         self.examples.len()
     }
@@ -210,6 +252,34 @@ mod tests {
         let pairs: usize = d.examples.iter().map(|e| e.tokens.len()).sum();
         assert_eq!(pairs, 22);
         assert!(d.examples.iter().all(|e| e.tokens.len() <= 8 && e.tokens.len() == e.targets.len()));
+    }
+
+    #[test]
+    fn tokenized_jsonl_shifts_labels_and_keeps_masks() {
+        let text = r#"{"input_ids":[5,6,7,8],"labels":[-100,-100,7,8]}
+{"input_ids":[1],"labels":[1]}
+{"input_ids":[9,9,9],"labels":[-100,-100,-100]}
+{"input_ids":[1,2,3,4,5,6],"labels":[1,2,3,4,5,6]}
+"#;
+        let d = Dataset::from_tokenized_jsonl(text, 3).unwrap();
+        assert_eq!(d.len(), 2); // too short and fully masked lines are dropped
+        // position i predicts label[i+1]; the first label is never a target
+        assert_eq!(d.examples[0].tokens, vec![5, 6, 7]);
+        assert_eq!(d.examples[0].targets, vec![IGNORE_INDEX, 7, 8]);
+        // seq_len 3 means at most 3 input tokens (4 ids)
+        assert_eq!(d.examples[1].tokens, vec![1, 2, 3]);
+        assert_eq!(d.examples[1].targets, vec![2, 3, 4]);
+        assert_eq!(d.max_token_id(), Some(8));
+    }
+
+    #[test]
+    fn tokenized_jsonl_errors_are_specific() {
+        let e = |s: &str| Dataset::from_tokenized_jsonl(s, 8).err().expect("should fail");
+        assert!(e(r#"{"input_ids":[1,2],"labels":[1]}"#).contains("labels has 1"));
+        assert!(e(r#"{"input_ids":[1,2]}"#).contains("missing \"labels\""));
+        assert!(e(r#"{"input_ids":[1,-2],"labels":[1,2]}"#).contains("invalid token id"));
+        assert!(e(r#"{"input_ids":[1,"x"],"labels":[1,2]}"#).contains("integers"));
+        assert!(e("nope").contains("line 1"));
     }
 
     #[test]
